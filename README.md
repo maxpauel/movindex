@@ -83,6 +83,7 @@ pip install opencv-python numpy pillow matplotlib tqdm
 
 # Usage
 Basic usage
+
       movindex -i input_video.mp4
 Input video file in common formats (e.g., .avi, .mp4, .mov)
 
