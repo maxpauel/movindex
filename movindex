@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+import os
+import numpy as np
+from PIL import Image
+import multiprocessing as mp
+from functools import partial
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import cv2
+import argparse
+import sys
+import tempfile
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Calculate movement indices from video frames with optional cropping',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    
+    # Required input
+    parser.add_argument('-i', '--input', required=True,
+                       help='Input video file path')
+    
+    # Cropping parameters
+    parser.add_argument('-x', type=int, default=0,
+                       help='X coordinate of crop region top-left corner')
+    parser.add_argument('-y', type=int, default=0,
+                       help='Y coordinate of crop region top-left corner')
+    parser.add_argument('-wd', '--width', type=int, default=None,
+                       help='Width of crop region (default: full width)')
+    parser.add_argument('-ht', '--height', type=int, default=None,
+                       help='Height of crop region (default: full height)')
+    
+    # Processing parameters
+    parser.add_argument('-w', '--window_size', type=int, default=7,
+                       help='Sliding window size for SD calculation')
+    parser.add_argument('-s', '--step', type=int, default=7,
+                       help='Step size between windows')
+    parser.add_argument('-p', '--cores', type=int, default=None,
+                       help='Number of CPU cores to use (default: all available)')
+    parser.add_argument('-o', '--output_dir', default=None,
+                       help='Output directory (default: same as input video)')
+    
+    return parser.parse_args()
+
+def crop_video(input_path, output_path, x, y, width, height):
+    """Crop video to specified region"""
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video {input_path}")
+    
+    # Get original dimensions if width/height not specified
+    if width is None:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x
+    if height is None:
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) - y
+    
+    # Validate crop dimensions
+    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    if (x + width) > orig_width or (y + height) > orig_height:
+        cap.release()
+        raise ValueError(f"Crop region exceeds video dimensions ({orig_width}x{orig_height})")
+    
+    # Set up output video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    # Process frames
+    print(f"Cropping video to {width}x{height} starting at ({x},{y})...")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        cropped = frame[y:y+height, x:x+width]
+        out.write(cropped)
+    
+    cap.release()
+    out.release()
+    return output_path
+
+def extract_frames(video_path, output_dir, frame_prefix='frame'):
+    """Extract frames from video and save as TIFF files"""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    vidcap = cv2.VideoCapture(video_path)
+    if not vidcap.isOpened():
+        print(f"Error: Could not open video file {video_path}")
+        sys.exit(1)
+    
+    success, image = vidcap.read()
+    count = 0
+    
+    print(f"Extracting frames from {video_path}...")
+    while success:
+        frame_path = os.path.join(output_dir, f"{frame_prefix}_{count:04d}.tiff")
+        cv2.imwrite(frame_path, image)
+        success, image = vidcap.read()
+        count += 1
+        if count % 100 == 0:
+            print(f"Extracted {count} frames...")
+    
+    print(f"Finished extracting {count} frames to {output_dir}")
+    return count
+
+def load_image_grayscale(filename):
+    """Load image and convert to grayscale matrix (0-255)"""
+    img = Image.open(filename).convert('L')
+    return np.array(img)
+
+def calculate_pixel_sd(pixel_series, window_size=7, step=7):
+    """Calculate sliding window SD for a single pixel's time series"""
+    n = len(pixel_series)
+    if n < window_size:
+        return 0
+        
+    shape = (n - window_size + 1, window_size)
+    strides = (pixel_series.strides[0], pixel_series.strides[0])
+    windows = np.lib.stride_tricks.as_strided(
+        pixel_series, shape=shape, strides=strides
+    )[::step]
+    
+    return np.std(windows, axis=1).mean()
+
+def create_custom_colormap(colors=None):
+    """Create colormap from specified colors or use default"""
+    if colors is None:
+        colors = [
+            (0.0, 'darkblue'),
+            (2/50, 'blue'),
+            (5/50, 'green'),
+            (10/50, 'yellow'),
+            (1.0, 'red')
+        ]
+    return LinearSegmentedColormap.from_list('custom_cmap', colors)
+
+def save_heatmap(data, filename, cmap, vmin=0, vmax=50, colorbar=True):
+    """Save 2D heatmap with proper aspect ratio and color key"""
+    plt.figure(figsize=(20, 20 * data.shape[0]/data.shape[1]))
+    ax = plt.gca()
+    im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+    plt.axis('off')
+    
+    if colorbar:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        plt.colorbar(im, cax=cax)
+    
+    plt.savefig(filename, bbox_inches='tight', pad_inches=0, dpi=300, format='tiff')
+    plt.close()
+
+def save_pixel_trace_plot(pixel_values, filename, max_sd_value):
+    """Save time series plot of pixel values as TIFF"""
+    plt.figure(figsize=(12, 6))
+    plt.plot(pixel_values, 'b-', linewidth=1)
+    plt.title(f'Pixel Value Time Series (Max SD: {max_sd_value:.2f})')
+    plt.xlabel('Frame Number')
+    plt.ylabel('Pixel Intensity (0-255)')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(filename, format='tiff', bbox_inches='tight', dpi=300)
+    plt.close()
+
+def main():
+    args = parse_arguments()
+    
+    # Set up paths
+    video_path = os.path.abspath(args.input)
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = args.output_dir if args.output_dir else os.path.dirname(video_path)
+    
+    # Step 0: Crop video if requested
+    if args.x > 0 or args.y > 0 or args.width or args.height:
+        temp_dir = tempfile.mkdtemp()
+        cropped_path = os.path.join(temp_dir, f"cropped_{base_name}.avi")
+        
+        try:
+            video_path = crop_video(
+                input_path=video_path,
+                output_path=cropped_path,
+                x=args.x,
+                y=args.y,
+                width=args.width,
+                height=args.height
+            )
+            print(f"Saved cropped video to: {cropped_path}")
+        except Exception as e:
+            print(f"Error cropping video: {str(e)}")
+            sys.exit(1)
+    
+    # Set up frame directory
+    frames_dir = os.path.join(output_dir, base_name)
+    
+    # Step 1: Extract frames from video if they don't exist
+    if not os.path.exists(frames_dir) or not os.listdir(frames_dir):
+        extract_frames(video_path, frames_dir)
+    
+    # Get and sort frame files
+    frame_files = sorted([os.path.join(frames_dir, f) 
+                        for f in os.listdir(frames_dir) 
+                        if f.endswith('.tiff')])
+    
+    if not frame_files:
+        print("Error: No frames found in directory")
+        sys.exit(1)
+    
+    # Load all frames and check dimensions
+    print("Loading frames...")
+    n_cores = args.cores if args.cores else mp.cpu_count()
+    with mp.Pool(processes=n_cores) as pool:
+        frames = pool.map(load_image_grayscale, frame_files)
+    
+    # Find reference dimensions (most common size)
+    dim_counts = {}
+    for f in frames:
+        dim_counts[f.shape] = dim_counts.get(f.shape, 0) + 1
+    ref_dim = max(dim_counts.items(), key=lambda x: x[1])[0]
+    
+    # Filter frames to only those matching reference dimensions
+    consistent_frames = [f for f in frames if f.shape == ref_dim]
+    print(f"Using {len(consistent_frames)}/{len(frames)} frames with dimensions {ref_dim}")
+    
+    # Stack only consistent frames
+    frame_stack = np.dstack(consistent_frames)
+    height, width = frame_stack.shape[:2]
+    
+    # Calculate IS2 (simple SD) and create heatmaps
+    print("Calculating simple SD (IS2)...")
+    sd_map = np.std(frame_stack, axis=2)
+    IS2 = np.mean(sd_map)
+    
+    # Original SD heatmap with colorbar
+    cmap1 = create_custom_colormap()
+    save_heatmap(sd_map, f"{output_dir}/{base_name}_sd.tiff", cmap1)
+    
+    # Additional SD heatmap with alternate colors
+    alt_colors = [
+        (0.0, 'darkblue'),
+        (3/50, 'blue'),
+        (10/50, 'green'),
+        (20/50, 'yellow'),
+        (1.0, 'red')
+    ]
+    cmap2 = create_custom_colormap(alt_colors)
+    save_heatmap(sd_map, f"{output_dir}/{base_name}_sd_alt.tiff", cmap2)
+    
+    # Calculate IS1 (sliding window SD) and create heatmap
+    print(f"Calculating sliding window SD (IS1) with window_size={args.window_size}, step={args.step}...")
+    with mp.Pool(processes=n_cores) as pool:
+        sdsw_flat = pool.map(partial(calculate_pixel_sd, window_size=args.window_size, step=args.step),
+                           [frame_stack[i,j,:] for i in range(height) for j in range(width)])
+    sdsw_map = np.array(sdsw_flat).reshape(height, width)
+    IS1 = np.mean(sdsw_map)
+    save_heatmap(sdsw_map, f"{output_dir}/{base_name}_sdsw.tiff", cmap1)
+    
+    # Find pixel with maximum sliding window SD
+    max_sd = np.max(sdsw_map)
+    max_loc = np.unravel_index(np.argmax(sdsw_map), sdsw_map.shape)
+    pixel_series = frame_stack[max_loc[0], max_loc[1], :]
+    
+    # Save pixel trace plot
+    print("Saving visualizations...")
+    save_pixel_trace_plot(pixel_series, f"{output_dir}/{base_name}_max_sd_trace.tiff", max_sd)
+    
+    # Print results
+    print("\nResults:")
+    print(f"IS1 (Sliding Window SD): {IS1:.4f}")
+    print(f"IS2 (Simple SD): {IS2:.4f}")
+    print(f"Max sliding window SD: {max_sd:.4f} at position {max_loc}")
+    print(f"\nVisualizations saved to {output_dir}:")
+    print(f"- {base_name}_sd.tiff (Simple SD heatmap with default colors)")
+    print(f"- {base_name}_sd_alt.tiff (Simple SD heatmap with alternate colors)")
+    print(f"- {base_name}_sdsw.tiff (Sliding window SD heatmap)")
+    print(f"- {base_name}_max_sd_trace.tiff (Pixel value time series)")
+
+    # Save IS1 to results.txt
+    results_file = os.path.join(output_dir, "results.txt")
+    with open(results_file, "a") as f:
+        f.write(f"{os.path.basename(args.input)}\t{IS1:.4f}\n")
+
+    print(f"\nIS1 result appended to: {results_file}")
+
+if __name__ == '__main__':
+    main()
