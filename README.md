@@ -59,9 +59,9 @@ Linux
  2. Open Command Prompt (Admin)
 cmd
 
-python -m pip install --upgrade pip
-python -m venv video_analysis_env
-video_analysis_env\Scripts\activate
+      python -m pip install --upgrade pip
+      python -m venv video_analysis_env
+      video_analysis_env\Scripts\activate
 
  3. Install dependencies
 cmd
