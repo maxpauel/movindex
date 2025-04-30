@@ -118,13 +118,13 @@ Options:
 - Visualizations:
 
   *_sd.tiff: SD heatmap (default colors)
-
+![Standard deviation of brightness intensity](https://github.com/maxpauel/movindex/blob/main/sd.png)
   *_sd_alt.tiff: SD heatmap (alternate colors)
-
+![Standard deviation of brightness intensity (alternative scale)](https://github.com/maxpauel/movindex/blob/main/sd_alt.png)
   *_sdsw.tiff: Sliding window SD heatmap
-
+![Standard deviation of brightness intensity in sliding window](https://github.com/maxpauel/movindex/blob/main/sdsw.png)
   *_max_sd_trace.tiff: Time series of most active pixel
-
+![Pixel with maximum sliding window SD](https://github.com/maxpauel/movindex/blob/main/max_sd_trace.png)
     Intermediate Files:
 
   Frames directory with extracted TIFF images
